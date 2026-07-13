@@ -140,7 +140,13 @@ pub trait ProviderServer: Sized + Send {
                                     break;
                                 }
                             }
-                            Ok(buffer) = socket.read() => {
+                            result = socket.read() => {
+                                let Ok(buffer) = result else {
+                                    // A UDP peer session can be closed when its dispatcher
+                                    // channel is dropped. Do not re-poll the immediately-ready
+                                    // error: that would spin this task and starve the runtime.
+                                    break;
+                                };
                                 read_delay = 0;
 
                                 if let Ok(Some(res)) = router.route(&buffer, &mut response_buffer).await
