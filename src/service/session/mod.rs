@@ -913,7 +913,7 @@ mod relay_state_tests {
     }
 
     #[tokio::test]
-    async fn permitted_arbitrary_udp_peer_exchanges_datagrams_with_relay_socket() {
+    async fn permitted_cross_interface_peer_exchanges_datagrams_with_relay_socket() {
         let manager = SessionManager::new(SessionManagerOptions {
             port_range: (40200..40300).into(),
             handler: Handler,
@@ -926,9 +926,12 @@ mod relay_state_tests {
             .allocate(&client, None)
             .expect("allocation should succeed");
 
-        let peer = UdpSocket::bind("127.0.0.1:0")
+        // Linux routes all of 127.0.0.0/8 through loopback, so 127.0.0.2
+        // gives this test a distinct interface address without requiring a
+        // host-level network namespace or a second NIC.
+        let peer = UdpSocket::bind("127.0.0.2:0")
             .await
-            .expect("peer socket should bind");
+            .expect("cross-interface peer socket should bind");
         let peer_address = peer.local_addr().expect("peer address should be available");
         assert!(manager.create_permission(&client, &[peer_address]));
 
