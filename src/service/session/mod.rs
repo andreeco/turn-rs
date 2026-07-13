@@ -575,7 +575,18 @@ where
             return Some(*port);
         }
 
+        // A configured relay range is finite. If every candidate cannot bind
+        // (for example, stale sockets still hold the ports), return capacity
+        // exhaustion instead of continuously reallocating the same ports and
+        // starving the runtime.
+        let max_bind_attempts = self.port_allocator.lock().capacity();
+        let mut attempts = 0;
         let (port, relay_socket) = loop {
+            if attempts == max_bind_attempts {
+                return None;
+            }
+            attempts += 1;
+
             let port = self.port_allocator.lock().allocate(None)?;
             let address = SocketAddr::new(identifier.interface.ip(), port);
             let socket = match std::net::UdpSocket::bind(address) {
