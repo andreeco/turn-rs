@@ -67,6 +67,20 @@ pub fn hmac_sha1(key: &[u8], source: &[&[u8]]) -> [u8; 20] {
     result
 }
 
+/// HMAC-SHA-256 digest.
+pub fn hmac_sha256(key: &[u8], source: &[&[u8]]) -> [u8; 32] {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    let mut ctx = hmac::Context::with_key(&key);
+
+    for buf in source {
+        ctx.update(buf);
+    }
+
+    let mut result = [0u8; 32];
+    result.copy_from_slice(ctx.sign().as_ref());
+    result
+}
+
 /// CRC32 Fingerprint.
 ///
 /// # Test

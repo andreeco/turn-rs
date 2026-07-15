@@ -3,7 +3,7 @@ pub mod methods;
 
 use super::{
     Attributes, Error,
-    crypto::{Password, fingerprint, hmac_sha1},
+    crypto::{Password, fingerprint, hmac_sha1, hmac_sha256},
     message::{
         attributes::{Attribute, AttributeType, MessageIntegrity, MessageIntegritySha256},
         methods::Method,
@@ -233,21 +233,31 @@ impl<'a> MessageEncoder<'a> {
         // new size include the MessageIntegrity attribute size.
         self.set_len(len + 4);
 
-        // write MessageIntegrity attribute.
-        {
-            let hmac = hmac_sha1(password, &[self.bytes]);
-            self.bytes.put_u16(match password {
-                Password::Md5(_) => AttributeType::MessageIntegrity as u16,
-                Password::Sha256(_) => AttributeType::MessageIntegritySha256 as u16,
-            });
+        let integrity_len = match password {
+            Password::Md5(_) => 20,
+            Password::Sha256(_) => 32,
+        };
+        let message_integrity_len = len + integrity_len - 16;
+        self.set_len(message_integrity_len);
 
-            self.bytes.put_u16(20);
-            self.bytes.put(hmac.as_slice());
+        match password {
+            Password::Md5(_) => {
+                let hmac = hmac_sha1(password, &[self.bytes]);
+                self.bytes.put_u16(AttributeType::MessageIntegrity as u16);
+                self.bytes.put_u16(integrity_len as u16);
+                self.bytes.put(hmac.as_slice());
+            }
+            Password::Sha256(_) => {
+                let hmac = hmac_sha256(password, &[self.bytes]);
+                self.bytes
+                    .put_u16(AttributeType::MessageIntegritySha256 as u16);
+                self.bytes.put_u16(integrity_len as u16);
+                self.bytes.put(hmac.as_slice());
+            }
         }
 
-        // compute new size,
-        // new size include the Fingerprint attribute size.
-        self.set_len(len + 4 + 8);
+        // Include the Fingerprint attribute in the final STUN message length.
+        self.set_len(message_integrity_len + 8);
 
         // CRC Fingerprint
         let fingerprint = fingerprint(self.bytes);
@@ -428,20 +438,23 @@ impl<'a> Message<'a> {
         }
         .ok_or(Error::NotFoundIntegrity)?;
 
-        // create multiple submit.
-        let size_buf = (self.size + 4).to_be_bytes();
+        let integrity_len = match password {
+            Password::Md5(_) => 20,
+            Password::Sha256(_) => 32,
+        };
+        let size_buf = (self.size + integrity_len - 16).to_be_bytes();
         let body = [
             &self.bytes[0..2],
             &size_buf,
             &self.bytes[4..self.size as usize],
         ];
 
-        // digest the message buffer.
-        {
-            // Compare local and original attribute.
-            if integrity != hmac_sha1(password, &body).as_slice() {
-                return Err(Error::IntegrityFailed);
-            }
+        let expected = match password {
+            Password::Md5(_) => hmac_sha1(password, &body).to_vec(),
+            Password::Sha256(_) => hmac_sha256(password, &body).to_vec(),
+        };
+        if integrity != expected {
+            return Err(Error::IntegrityFailed);
         }
 
         Ok(())
@@ -538,7 +551,10 @@ impl<'a> Message<'a> {
             let attrkind = if let Ok(kind) = AttributeType::try_from(key) {
                 // check whether the current attribute is MessageIntegrity,
                 // if it is, mark this attribute has been found.
-                if kind == AttributeType::MessageIntegrity {
+                if matches!(
+                    kind,
+                    AttributeType::MessageIntegrity | AttributeType::MessageIntegritySha256
+                ) {
                     find_integrity = true;
                 }
 
@@ -580,6 +596,46 @@ impl<'a> Message<'a> {
         }
 
         Ok((u16::from_be_bytes(buffer[2..4].try_into()?) + 20) as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::BytesMut;
+
+    use super::{Message, MessageEncoder};
+    use crate::codec::{
+        Attributes,
+        crypto::generate_password,
+        message::{
+            attributes::{MessageIntegritySha256, PasswordAlgorithm},
+            methods::ALLOCATE_REQUEST,
+        },
+    };
+
+    #[test]
+    fn sha256_message_integrity_round_trips_with_a_32_byte_hmac() {
+        let password = generate_password("user", "password", "realm", PasswordAlgorithm::Sha256);
+        let transaction_id = [0xAB; 12];
+        let mut bytes = BytesMut::new();
+        let mut encoder = MessageEncoder::new(ALLOCATE_REQUEST, &transaction_id, &mut bytes);
+        encoder
+            .flush(Some(&password))
+            .expect("SHA-256 integrity should encode");
+
+        let mut attributes = Attributes::default();
+        let message = Message::decode(&bytes, &mut attributes).expect("message should decode");
+        assert_eq!(
+            message
+                .get::<MessageIntegritySha256>()
+                .expect("SHA-256 integrity attribute should be present")
+                .len(),
+            32,
+        );
+        assert!(
+            message.verify(&password).is_ok(),
+            "SHA-256 integrity should verify"
+        );
     }
 }
 
